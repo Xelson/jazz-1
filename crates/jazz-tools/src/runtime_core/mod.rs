@@ -292,6 +292,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     storage_write_pending_flush: bool,
     /// Transport handle for WebSocket sync.
     pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
+    /// True when an inbound catalogue sync changed local catalogue state and
+    /// the transport handshake hash must be refreshed after the tick applies it.
+    transport_catalogue_state_hash_dirty: bool,
     /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
     /// the server side, where the runtime fans out via `ConnectionEventHub`
     /// instead of a WebSocket connection).
@@ -404,6 +407,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             scheduler,
             storage_write_pending_flush: false,
             transport: None,
+            transport_catalogue_state_hash_dirty: false,
             sync_sender: None,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
@@ -519,6 +523,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .schema_manager
             .persist_schema_object(&mut self.storage, &schema);
         self.mark_storage_write_pending_flush();
+        self.refresh_transport_catalogue_state_hash();
         self.immediate_tick();
         id
     }
@@ -537,6 +542,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )?;
         if id.is_some() {
             self.mark_storage_write_pending_flush();
+            self.refresh_transport_catalogue_state_hash();
         }
         self.immediate_tick();
         Ok(id)
@@ -549,6 +555,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .publish_lens(&mut self.storage, lens)
             .map_err(|error| RuntimeError::WriteError(error.to_string()))?;
         self.mark_storage_write_pending_flush();
+        self.refresh_transport_catalogue_state_hash();
         self.immediate_tick();
         Ok(id)
     }
@@ -629,10 +636,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.transport = Some(handle);
     }
 
-    fn refresh_transport_catalogue_state_hash(&self) {
+    pub(crate) fn mark_transport_catalogue_state_hash_dirty(&mut self) {
+        self.transport_catalogue_state_hash_dirty = true;
+    }
+
+    fn refresh_transport_catalogue_state_hash(&mut self) {
         if let Some(handle) = self.transport.as_ref() {
             handle.set_catalogue_state_hash(Some(self.schema_manager.catalogue_state_hash()));
         }
+        self.transport_catalogue_state_hash_dirty = false;
     }
 
     /// Detach the transport handle and remove its server from sync state.
